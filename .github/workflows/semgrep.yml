@@ -1,29 +1,28 @@
 # Name of this GitHub Actions workflow.
-name: Semgrep Security Scan
+name: Semgrep CE scan
 
 on:
   # Scan in PRs:
-  pull_request:
-    branches: ["main", "develop"]
+  pull_request: {}
   # Scan on-demand through GitHub Actions interface:
   workflow_dispatch:
     inputs:
-      scan_depth:
-        description: 'Scan depth (auto, deep, medium, shallow)'
+      fail_on_findings:
+        description: 'Fail workflow if findings are detected'
         required: false
-        default: 'auto'
-        type: choice
-        options:
-          - auto
-          - deep
-          - medium
-          - shallow
+        default: false
+        type: boolean
+      exclude_patterns:
+        description: 'Comma-separated list of patterns to exclude (e.g., "node_modules,dist")'
+        required: false
+        default: ''
   # Scan mainline branches and report all findings:
   push:
-    branches: ["main", "develop"]
+    branches: ["master", "main"]
   # Schedule the CI job (this method uses cron syntax):
   schedule:
-    - cron: '0 15 * * *' # Run every day at 15:00 UTC, which is 00:00 JST.
+    - cron: '20 17 * * *' # Sets Semgrep to scan every day at 17:20 UTC.
+    # It is recommended to change the schedule to a random time.
 
 # Limit concurrent runs of this workflow
 concurrency:
@@ -33,19 +32,18 @@ concurrency:
 permissions:
   contents: read
   security-events: write  # For GitHub Code Scanning integration
-  pull-requests: write    # For PR comments
 
 jobs:
   semgrep:
     # User definable name of this GitHub Actions job.
-    name: semgrep-scan
-    # If you are self-hosting, change the following `runs-on` value:
+    name: semgrep-oss/scan
+    # If you are self-hosting, change the following `runs-on` value: 
     runs-on: ubuntu-latest
     timeout-minutes: 30  # Set a timeout to prevent long-running jobs
 
     container:
       # A Docker image with Semgrep installed. Do not change this.
-      image: semgrep/semgrep:latest
+      image: semgrep/semgrep
 
     # Skip any PR created by dependabot to avoid permission issues:
     if: (github.actor != 'dependabot[bot]')
@@ -57,38 +55,66 @@ jobs:
         with:
           fetch-depth: 0  # Fetch all history for better analysis
 
-      # Set up cache for Semgrep
+      # Set up cache for Semgrep rules
       - name: Cache Semgrep rules
-        uses: actions/cache@v4
+        uses: actions/cache@v3
         with:
           path: ~/.semgrep
           key: ${{ runner.os }}-semgrep-${{ hashFiles('**/.semgrepignore') }}
           restore-keys: |
             ${{ runner.os }}-semgrep-
 
-      # Determine scan depth
-      - name: Set scan depth
-        id: scan-depth
+      # Set up exclusion patterns if provided
+      - name: Set up exclusion patterns
+        id: exclusions
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "SCAN_DEPTH=${{ github.event.inputs.scan_depth }}" >> $GITHUB_ENV
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.exclude_patterns }}" ]; then
+            EXCLUDE_ARGS=""
+            IFS=',' read -ra PATTERNS <<< "${{ github.event.inputs.exclude_patterns }}"
+            for pattern in "${PATTERNS[@]}"; do
+              EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude $pattern"
+            done
+            echo "exclude_args=$EXCLUDE_ARGS" >> $GITHUB_OUTPUT
           else
-            echo "SCAN_DEPTH=auto" >> $GITHUB_ENV
+            # Default exclusions
+            echo "exclude_args=--exclude node_modules --exclude dist --exclude .git" >> $GITHUB_OUTPUT
           fi
 
       # Run Semgrep scan with enhanced configuration
       - name: Run Semgrep scan
+        id: semgrep
         run: |
+          set +e
           semgrep scan \
-            --config=p/default \
-            --config=p/owasp-top-ten \
-            --config=p/javascript \
-            --config=p/typescript \
-            --config=p/nodejs \
-            --config=p/angular \
-            --severity=ERROR \
+            --config auto \
+            ${{ steps.exclusions.outputs.exclude_args }} \
             --metrics=off \
             --json > semgrep-results.json
+          
+          EXIT_CODE=$?
+          
+          # Exit codes:
+          # 0: No errors, no findings
+          # 1: Findings found
+          # 2: Fatal error
+          
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "::error::Semgrep scan failed with a fatal error"
+            exit 2
+          fi
+          
+          # Count findings
+          FINDINGS=$(cat semgrep-results.json | jq -r '.results | length')
+          echo "findings=$FINDINGS" >> $GITHUB_OUTPUT
+          
+          # Determine if we should fail based on findings
+          SHOULD_FAIL="false"
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ github.event.inputs.fail_on_findings }}" == "true" ] && [ $FINDINGS -gt 0 ]; then
+            SHOULD_FAIL="true"
+          fi
+          echo "should_fail=$SHOULD_FAIL" >> $GITHUB_OUTPUT
+          
+          exit 0
         env:
           SEMGREP_TIMEOUT: 300
 
@@ -103,7 +129,9 @@ jobs:
       # Generate GitHub Code Scanning compatible output
       - name: Convert Semgrep output to SARIF
         run: |
-          semgrep scan --sarif --output=semgrep-results.sarif
+          semgrep scan --sarif --output=semgrep-results.sarif --config auto ${{ steps.exclusions.outputs.exclude_args }}
+        env:
+          SEMGREP_TIMEOUT: 300
 
       # Upload SARIF file for GitHub Code Scanning
       - name: Upload SARIF file
@@ -112,32 +140,32 @@ jobs:
           sarif_file: semgrep-results.sarif
           category: semgrep
 
-      # Post results as PR comment if this is a pull request
-      - name: Post results to PR
-        if: github.event_name == 'pull_request'
+      # Summarize findings
+      - name: Summarize findings
         run: |
-          FINDINGS=$(cat semgrep-results.json | jq -r '.results | length')
+          FINDINGS=${{ steps.semgrep.outputs.findings }}
           if [ $FINDINGS -gt 0 ]; then
             echo "::warning::Semgrep found $FINDINGS potential security issues. See the uploaded artifacts for details."
+            echo "Top findings:"
+            cat semgrep-results.json | jq -r '.results[0:5] | .[] | "- " + .check_id + ": " + .extra.message + " in " + .path + " (line " + (.start.line | tostring) + ")"'
             
-            # Create a comment on the PR
-            COMMENT="## 🔍 Semgrep Security Scan Results\n\n"
-            COMMENT+="Found **$FINDINGS** potential security issues.\n\n"
-            COMMENT+="[View detailed results in the workflow artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n\n"
-            
-            # Add the first 5 findings to the comment
-            if [ $FINDINGS -gt 0 ]; then
-              COMMENT+="### Top findings:\n\n"
-              cat semgrep-results.json | jq -r '.results[0:5] | .[] | "- **" + .check_id + "**: " + .extra.message + " in `" + .path + "` (line " + (.start.line | tostring) + ")\n"' >> pr_comment.txt
-              COMMENT+=$(cat pr_comment.txt)
-            fi
-            
-            echo "$COMMENT" > pr_comment.md
-            
-            # Post comment to PR using GitHub CLI
-            gh pr comment ${{ github.event.pull_request.number }} -F pr_comment.md
+            # Create a markdown summary
+            echo "## 🔍 Semgrep Security Scan Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Found **$FINDINGS** potential security issues." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Top findings:" >> $GITHUB_STEP_SUMMARY
+            cat semgrep-results.json | jq -r '.results[0:5] | .[] | "- **" + .check_id + "**: " + .extra.message + " in `" + .path + "` (line " + (.start.line | tostring) + ")"' >> $GITHUB_STEP_SUMMARY
           else
             echo "No security issues found by Semgrep."
+            echo "## ✅ Semgrep Security Scan Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No security issues found." >> $GITHUB_STEP_SUMMARY
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
+
+      # Fail the workflow if requested and findings were detected
+      - name: Fail on findings if requested
+        if: steps.semgrep.outputs.should_fail == 'true'
+        run: |
+          echo "::error::Failing workflow because security issues were found and fail_on_findings was set to true"
+          exit 1
