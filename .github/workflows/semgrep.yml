@@ -67,23 +67,28 @@ jobs:
       # Set up exclusion patterns if provided
       - name: Set up exclusion patterns
         id: exclusions
+        shell: bash
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.exclude_patterns }}" ]; then
+          # Initialize with default exclusions
+          EXCLUDE_ARGS="--exclude node_modules --exclude dist --exclude .git"
+          
+          # Override with custom exclusions if provided
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.exclude_patterns }}" ]; then
             EXCLUDE_ARGS=""
             IFS=',' read -ra PATTERNS <<< "${{ github.event.inputs.exclude_patterns }}"
             for pattern in "${PATTERNS[@]}"; do
               EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude $pattern"
             done
-            echo "exclude_args=$EXCLUDE_ARGS" >> $GITHUB_OUTPUT
-          else
-            # Default exclusions
-            echo "exclude_args=--exclude node_modules --exclude dist --exclude .git" >> $GITHUB_OUTPUT
           fi
+          
+          echo "exclude_args=$EXCLUDE_ARGS" >> $GITHUB_OUTPUT
 
       # Run Semgrep scan with enhanced configuration
       - name: Run Semgrep scan
         id: semgrep
+        shell: bash
         run: |
+          # Run Semgrep with configured options
           set +e
           semgrep scan \
             --config auto \
@@ -109,7 +114,9 @@ jobs:
           
           # Determine if we should fail based on findings
           SHOULD_FAIL="false"
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ github.event.inputs.fail_on_findings }}" == "true" ] && [ $FINDINGS -gt 0 ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+             [ "${{ github.event.inputs.fail_on_findings }}" = "true" ] && \
+             [ $FINDINGS -gt 0 ]; then
             SHOULD_FAIL="true"
           fi
           echo "should_fail=$SHOULD_FAIL" >> $GITHUB_OUTPUT
@@ -128,8 +135,13 @@ jobs:
 
       # Generate GitHub Code Scanning compatible output
       - name: Convert Semgrep output to SARIF
+        shell: bash
         run: |
-          semgrep scan --sarif --output=semgrep-results.sarif --config auto ${{ steps.exclusions.outputs.exclude_args }}
+          semgrep scan \
+            --sarif \
+            --output=semgrep-results.sarif \
+            --config auto \
+            ${{ steps.exclusions.outputs.exclude_args }}
         env:
           SEMGREP_TIMEOUT: 300
 
