@@ -53,13 +53,13 @@ jobs:
     steps:
       # Fetch project source with GitHub Actions Checkout. Use either v3 or v4.
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0  # Fetch all history for better analysis
 
       # Set up cache for Semgrep
       - name: Cache Semgrep rules
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.semgrep
           key: ${{ runner.os }}-semgrep-${{ hashFiles('**/.semgrepignore') }}
@@ -94,7 +94,7 @@ jobs:
 
       # Upload scan results as an artifact
       - name: Upload scan results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: semgrep-results
           path: semgrep-results.json
@@ -107,7 +107,7 @@ jobs:
 
       # Upload SARIF file for GitHub Code Scanning
       - name: Upload SARIF file
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep-results.sarif
           category: semgrep
