@@ -139,10 +139,10 @@ jobs:
           # Count findings
           if [ -f "semgrep-results.json" ]; then
             FINDINGS_COUNT=$(jq '.results | length' semgrep-results.json)
-            echo "findings-count=$FINDINGS_COUNT" >> $GITHUB_OUTPUT
+            echo "findings-count=$FINDINGS_COUNT" >> "$GITHUB_OUTPUT"
             echo "Found $FINDINGS_COUNT security findings"
           else
-            echo "findings-count=0" >> $GITHUB_OUTPUT
+            echo "findings-count=0" >> "$GITHUB_OUTPUT"
           fi
           
       - name: Upload SARIF results
