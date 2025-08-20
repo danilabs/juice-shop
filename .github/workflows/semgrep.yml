@@ -55,10 +55,6 @@ permissions:
   security-events: write  # For SARIF upload
   pull-requests: write    # For PR comments
 
-env:
-  SEMGREP_TIMEOUT: 300
-  SEMGREP_RULES_TIMEOUT: 30
-
 jobs:
   semgrep:
     name: Semgrep Security Scan
