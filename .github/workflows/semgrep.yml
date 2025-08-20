@@ -101,30 +101,38 @@ jobs:
         run: |
           set -e
           
-          # Build scan command
-          SCAN_CMD="semgrep scan --config=${{ steps.params.outputs.config }}"
-          SCAN_CMD="$SCAN_CMD --severity=${{ steps.params.outputs.severity }}"
-          SCAN_CMD="$SCAN_CMD --json --output=semgrep-results.json"
-          SCAN_CMD="$SCAN_CMD --sarif --sarif-output=semgrep-results.sarif"
-          SCAN_CMD="$SCAN_CMD --timeout-threshold=3"
-          
-          # Add exclude paths if specified
+          # Set base parameters
+          CONFIG="${{ steps.params.outputs.config }}"
+          SEVERITY="${{ steps.params.outputs.severity }}"
           EXCLUDE_PATHS="${{ steps.params.outputs.exclude_paths }}"
+          
+          echo "Starting Semgrep scan with config: $CONFIG, severity: $SEVERITY"
+          
+          # Build exclude arguments
+          EXCLUDE_ARGS="--exclude=node_modules/ --exclude=vendor/ --exclude=.git/"
+          
           if [ -n "$EXCLUDE_PATHS" ]; then
             IFS=',' read -ra EXCLUDES <<< "$EXCLUDE_PATHS"
             for exclude in "${EXCLUDES[@]}"; do
-              exclude=$(echo "$exclude" | xargs)  # trim whitespace
-              SCAN_CMD="$SCAN_CMD --exclude=$exclude"
+              exclude=$(echo "$exclude" | xargs)
+              if [ -n "$exclude" ]; then
+                EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude=$exclude"
+              fi
             done
           fi
           
-          # Default exclusions
-          SCAN_CMD="$SCAN_CMD --exclude=node_modules/ --exclude=vendor/ --exclude=.git/"
+          echo "Exclude arguments: $EXCLUDE_ARGS"
           
-          echo "Running: $SCAN_CMD"
-          
-          # Run scan and capture results
-          if eval "$SCAN_CMD"; then
+          # Run Semgrep scan
+          if semgrep scan \
+            --config="$CONFIG" \
+            --severity="$SEVERITY" \
+            --json \
+            --output=semgrep-results.json \
+            --sarif \
+            --sarif-output=semgrep-results.sarif \
+            --timeout-threshold=3 \
+            $EXCLUDE_ARGS; then
             echo "✅ Semgrep scan completed successfully"
           else
             EXIT_CODE=$?
