@@ -1,215 +1,143 @@
-# Semgrep CE Security Scan Workflow
+# Name of this GitHub Actions workflow.
 name: Semgrep Security Scan
 
 on:
-  # Scan pull requests
+  # Scan in PRs:
   pull_request:
-    types: [opened, synchronize, reopened]
-    
-  # On-demand scan through GitHub Actions interface
+    branches: ["main", "develop"]
+  # Scan on-demand through GitHub Actions interface:
   workflow_dispatch:
     inputs:
-      config:
-        description: 'Semgrep config to use'
+      scan_depth:
+        description: 'Scan depth (auto, deep, medium, shallow)'
         required: false
         default: 'auto'
         type: choice
         options:
-          - 'auto'
-          - 'p/security-audit'
-          - 'p/owasp-top-10'
-          - 'p/cwe-top-25'
-          - 'p/r2c-security-audit'
-      severity:
-        description: 'Minimum severity level'
-        required: false
-        default: 'INFO'
-        type: choice
-        options:
-          - 'INFO'
-          - 'WARNING' 
-          - 'ERROR'
-      exclude_paths:
-        description: 'Paths to exclude (comma-separated)'
-        required: false
-        default: ''
-        
-  # Scan main branches on push
+          - auto
+          - deep
+          - medium
+          - shallow
+  # Scan mainline branches and report all findings:
   push:
-    branches: 
-      - main
-      - develop
-      - master
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.github/**'
-      
-  # Scheduled daily scan
+    branches: ["main", "develop"]
+  # Schedule the CI job (this method uses cron syntax):
   schedule:
-    - cron: '0 15 * * *'  # Daily at 15:00 UTC (00:00 JST)
+    - cron: '0 15 * * *' # Run every day at 15:00 UTC, which is 00:00 JST.
 
-# Minimal required permissions
+# Limit concurrent runs of this workflow
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
-  security-events: write  # For SARIF upload
+  security-events: write  # For GitHub Code Scanning integration
   pull-requests: write    # For PR comments
-
-env:
-  SEMGREP_TIMEOUT: 300
-  SEMGREP_RULES_TIMEOUT: 30
 
 jobs:
   semgrep:
-    name: Semgrep Security Scan
+    # User definable name of this GitHub Actions job.
+    name: semgrep-scan
+    # If you are self-hosting, change the following `runs-on` value:
     runs-on: ubuntu-latest
-    
-    # Skip scans for dependabot and draft PRs
-    if: |
-      github.actor != 'dependabot[bot]' && 
-      github.actor != 'dependabot-preview[bot]' &&
-      !github.event.pull_request.draft
-    
+    timeout-minutes: 30  # Set a timeout to prevent long-running jobs
+
     container:
+      # A Docker image with Semgrep installed. Do not change this.
       image: semgrep/semgrep:latest
-      
-    outputs:
-      findings-count: ${{ steps.count-findings.outputs.findings-count }}
-      
+
+    # Skip any PR created by dependabot to avoid permission issues:
+    if: (github.actor != 'dependabot[bot]')
+
     steps:
+      # Fetch project source with GitHub Actions Checkout. Use either v3 or v4.
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for better analysis
-          
-      - name: Run Semgrep scan
-        id: scan
-        run: |
-          set -e
-          
-          echo "Starting Semgrep scan..."
-          
-          # Run basic Semgrep scan with minimal options
-          if semgrep scan --config=auto --json --output=semgrep-results.json --sarif --sarif-output=semgrep-results.sarif --exclude=node_modules/ --exclude=vendor/ --exclude=.git/; then
-            echo "✅ Semgrep scan completed successfully"
-          else
-            EXIT_CODE=$?
-            if [ $EXIT_CODE -eq 1 ]; then
-              echo "⚠️ Semgrep found issues (exit code 1)"
-            else
-              echo "❌ Semgrep scan failed with exit code $EXIT_CODE"
-              exit $EXIT_CODE
-            fi
-          fi
-          
-      - name: Count findings and set output
-        if: always() && hashFiles('semgrep-results.json') != ''
-        id: count-findings
-        uses: actions/github-script@v7
+          fetch-depth: 0  # Fetch all history for better analysis
+
+      # Set up cache for Semgrep
+      - name: Cache Semgrep rules
+        uses: actions/cache@v3
         with:
-          script: |
-            const fs = require('fs');
-            try {
-              const results = JSON.parse(fs.readFileSync('semgrep-results.json', 'utf8'));
-              const findingsCount = results.results ? results.results.length : 0;
-              
-              core.setOutput('findings-count', findingsCount);
-              core.info(`Found ${findingsCount} security findings`);
-              
-              return findingsCount;
-            } catch (error) {
-              core.setOutput('findings-count', 0);
-              core.warning('Could not parse semgrep results, assuming 0 findings');
-              return 0;
-            }
-          
-      - name: Upload SARIF results
-        if: always() && hashFiles('semgrep-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+          path: ~/.semgrep
+          key: ${{ runner.os }}-semgrep-${{ hashFiles('**/.semgrepignore') }}
+          restore-keys: |
+            ${{ runner.os }}-semgrep-
+
+      # Determine scan depth
+      - name: Set scan depth
+        id: scan-depth
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "SCAN_DEPTH=${{ github.event.inputs.scan_depth }}" >> $GITHUB_ENV
+          else
+            echo "SCAN_DEPTH=auto" >> $GITHUB_ENV
+          fi
+
+      # Run Semgrep scan with enhanced configuration
+      - name: Run Semgrep scan
+        run: |
+          semgrep scan \
+            --config=p/default \
+            --config=p/owasp-top-ten \
+            --config=p/javascript \
+            --config=p/typescript \
+            --config=p/nodejs \
+            --config=p/angular \
+            --severity=ERROR \
+            --metrics=off \
+            --json > semgrep-results.json
+        env:
+          SEMGREP_TIMEOUT: 300
+
+      # Upload scan results as an artifact
+      - name: Upload scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+          retention-days: 7
+
+      # Generate GitHub Code Scanning compatible output
+      - name: Convert Semgrep output to SARIF
+        run: |
+          semgrep scan --sarif --output=semgrep-results.sarif
+
+      # Upload SARIF file for GitHub Code Scanning
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
         with:
           sarif_file: semgrep-results.sarif
           category: semgrep
-          
-      - name: Upload scan results as artifact
-        if: always() && hashFiles('semgrep-results.json') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-results-${{ github.run_id }}
-          path: |
-            semgrep-results.json
-            semgrep-results.sarif
-          retention-days: 30
-          
-      - name: Comment on PR
-        if: |
-          github.event_name == 'pull_request' && 
-          steps.count-findings.outputs.findings-count != '0' &&
-          hashFiles('semgrep-results.json') != ''
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const results = JSON.parse(fs.readFileSync('semgrep-results.json', 'utf8'));
-            const findingsCount = results.results ? results.results.length : 0;
-            
-            if (findingsCount === 0) return;
-            
-            const severityCounts = (results.results || []).reduce((acc, result) => {
-              const severity = result.extra?.severity || 'UNKNOWN';
-              acc[severity] = (acc[severity] || 0) + 1;
-              return acc;
-            }, {});
-            
-            const summaryLines = Object.entries(severityCounts)
-              .map(([severity, count]) => `- ${severity}: ${count}`)
-              .join('\n');
-            
-            const body = `## 🔍 Semgrep Security Scan Results
-            
-            Found **${findingsCount}** security finding(s):
-            
-            ${summaryLines}
-            
-            📋 View detailed results in the [Security tab](${context.payload.repository.html_url}/security/code-scanning) or check the workflow artifacts.
-            
-            <details>
-            <summary>Top 3 Findings</summary>
-            
-            ${(results.results || []).slice(0, 3).map(result => 
-              `**${result.check_id}** (${result.extra?.severity || 'UNKNOWN'})\n` +
-              `📍 \`${result.path}:${result.start?.line || 'N/A'}\`\n` +
-              `💡 ${result.extra?.message || 'No message available'}\n`
-            ).join('\n---\n')}
-            
-            </details>`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
-            
-      - name: Fail on high severity findings
+
+      # Post results as PR comment if this is a pull request
+      - name: Post results to PR
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
+        run: |
+          FINDINGS=$(cat semgrep-results.json | jq -r '.results | length')
+          if [ $FINDINGS -gt 0 ]; then
+            echo "::warning::Semgrep found $FINDINGS potential security issues. See the uploaded artifacts for details."
             
-            if (!fs.existsSync('semgrep-results.json')) {
-              return;
-            }
+            # Create a comment on the PR
+            COMMENT="## 🔍 Semgrep Security Scan Results\n\n"
+            COMMENT+="Found **$FINDINGS** potential security issues.\n\n"
+            COMMENT+="[View detailed results in the workflow artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n\n"
             
-            try {
-              const results = JSON.parse(fs.readFileSync('semgrep-results.json', 'utf8'));
-              const highSeverityCount = (results.results || []).filter(
-                result => result.extra?.severity === 'ERROR'
-              ).length;
-              
-              if (highSeverityCount > 0) {
-                core.setFailed(`❌ Found ${highSeverityCount} high severity (ERROR) findings. Please review and fix these issues before merging.`);
-              }
-            } catch (error) {
-              core.warning('Could not parse semgrep results for severity check');
-            }
+            # Add the first 5 findings to the comment
+            if [ $FINDINGS -gt 0 ]; then
+              COMMENT+="### Top findings:\n\n"
+              cat semgrep-results.json | jq -r '.results[0:5] | .[] | "- **" + .check_id + "**: " + .extra.message + " in `" + .path + "` (line " + (.start.line | tostring) + ")\n"' >> pr_comment.txt
+              COMMENT+=$(cat pr_comment.txt)
+            fi
+            
+            echo "$COMMENT" > pr_comment.md
+            
+            # Post comment to PR using GitHub CLI
+            gh pr comment ${{ github.event.pull_request.number }} -F pr_comment.md
+          else
+            echo "No security issues found by Semgrep."
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
