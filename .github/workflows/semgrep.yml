@@ -55,9 +55,6 @@ permissions:
   security-events: write  # For SARIF upload
   pull-requests: write    # For PR comments
 
-env:
-  SEMGREP_TIMEOUT: 300
-  SEMGREP_RULES_TIMEOUT: 30
 
 jobs:
   semgrep:
@@ -80,7 +77,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for better analysis
+          fetch-depth: 1  # Full history for better analysis
           
       - name: Set scan parameters
         id: params
@@ -106,7 +103,6 @@ jobs:
           SCAN_CMD="$SCAN_CMD --severity=${{ steps.params.outputs.severity }}"
           SCAN_CMD="$SCAN_CMD --json --output=semgrep-results.json"
           SCAN_CMD="$SCAN_CMD --sarif --sarif-output=semgrep-results.sarif"
-          SCAN_CMD="$SCAN_CMD --timeout=${{ env.SEMGREP_TIMEOUT }}"
           SCAN_CMD="$SCAN_CMD --timeout-threshold=3"
           
           # Add exclude paths if specified
