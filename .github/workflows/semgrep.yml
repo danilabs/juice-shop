@@ -82,57 +82,15 @@ jobs:
         with:
           fetch-depth: 0  # Full history for better analysis
           
-      - name: Set scan parameters
-        id: params
-        run: |
-          # Set config based on trigger type and inputs
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "config=${{ github.event.inputs.config || 'auto' }}" >> $GITHUB_OUTPUT
-            echo "severity=${{ github.event.inputs.severity || 'INFO' }}" >> $GITHUB_OUTPUT
-            echo "exclude_paths=${{ github.event.inputs.exclude_paths }}" >> $GITHUB_OUTPUT
-          else
-            echo "config=auto" >> $GITHUB_OUTPUT
-            echo "severity=INFO" >> $GITHUB_OUTPUT
-            echo "exclude_paths=" >> $GITHUB_OUTPUT
-          fi
-          
       - name: Run Semgrep scan
         id: scan
         run: |
           set -e
           
-          # Set base parameters
-          CONFIG="${{ steps.params.outputs.config }}"
-          SEVERITY="${{ steps.params.outputs.severity }}"
-          EXCLUDE_PATHS="${{ steps.params.outputs.exclude_paths }}"
+          echo "Starting Semgrep scan..."
           
-          echo "Starting Semgrep scan with config: $CONFIG, severity: $SEVERITY"
-          
-          # Build exclude arguments
-          EXCLUDE_ARGS="--exclude=node_modules/ --exclude=vendor/ --exclude=.git/"
-          
-          if [ -n "$EXCLUDE_PATHS" ]; then
-            IFS=',' read -ra EXCLUDES <<< "$EXCLUDE_PATHS"
-            for exclude in "${EXCLUDES[@]}"; do
-              exclude=$(echo "$exclude" | xargs)
-              if [ -n "$exclude" ]; then
-                EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude=$exclude"
-              fi
-            done
-          fi
-          
-          echo "Exclude arguments: $EXCLUDE_ARGS"
-          
-          # Run Semgrep scan
-          if semgrep scan \
-            --config="$CONFIG" \
-            --severity="$SEVERITY" \
-            --json \
-            --output=semgrep-results.json \
-            --sarif \
-            --sarif-output=semgrep-results.sarif \
-            --timeout-threshold=3 \
-            $EXCLUDE_ARGS; then
+          # Run basic Semgrep scan with minimal options
+          if semgrep scan --config=auto --json --output=semgrep-results.json --sarif --sarif-output=semgrep-results.sarif --exclude=node_modules/ --exclude=vendor/ --exclude=.git/; then
             echo "✅ Semgrep scan completed successfully"
           else
             EXIT_CODE=$?
