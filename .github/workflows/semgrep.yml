@@ -55,6 +55,9 @@ permissions:
   security-events: write  # For SARIF upload
   pull-requests: write    # For PR comments
 
+env:
+  SEMGREP_TIMEOUT: 300
+  SEMGREP_RULES_TIMEOUT: 30
 
 jobs:
   semgrep:
@@ -77,7 +80,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1  # Full history for better analysis
+          fetch-depth: 0  # Full history for better analysis
           
       - name: Set scan parameters
         id: params
@@ -106,10 +109,12 @@ jobs:
           SCAN_CMD="$SCAN_CMD --timeout-threshold=3"
           
           # Add exclude paths if specified
-          if [ -n "${{ steps.params.outputs.exclude_paths }}" ]; then
-            IFS=',' read -ra EXCLUDES <<< "${{ steps.params.outputs.exclude_paths }}"
+          EXCLUDE_PATHS="${{ steps.params.outputs.exclude_paths }}"
+          if [ -n "$EXCLUDE_PATHS" ]; then
+            IFS=',' read -ra EXCLUDES <<< "$EXCLUDE_PATHS"
             for exclude in "${EXCLUDES[@]}"; do
-              SCAN_CMD="$SCAN_CMD --exclude=${exclude// /}"
+              exclude=$(echo "$exclude" | xargs)  # trim whitespace
+              SCAN_CMD="$SCAN_CMD --exclude=$exclude"
             done
           fi
           
@@ -121,7 +126,6 @@ jobs:
           # Run scan and capture results
           if eval "$SCAN_CMD"; then
             echo "✅ Semgrep scan completed successfully"
-            EXIT_CODE=0
           else
             EXIT_CODE=$?
             if [ $EXIT_CODE -eq 1 ]; then
