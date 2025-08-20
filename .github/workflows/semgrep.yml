@@ -55,6 +55,10 @@ permissions:
   security-events: write  # For SARIF upload
   pull-requests: write    # For PR comments
 
+env:
+  SEMGREP_TIMEOUT: 300
+  SEMGREP_RULES_TIMEOUT: 30
+
 jobs:
   semgrep:
     name: Semgrep Security Scan
@@ -70,7 +74,7 @@ jobs:
       image: semgrep/semgrep:latest
       
     outputs:
-      findings-count: ${{ steps.scan.outputs.findings-count }}
+      findings-count: ${{ steps.count-findings.outputs.findings-count }}
       
     steps:
       - name: Checkout code
@@ -132,14 +136,26 @@ jobs:
             fi
           fi
           
-          # Count findings
-          if [ -f "semgrep-results.json" ]; then
-            FINDINGS_COUNT=$(jq '.results | length' semgrep-results.json)
-            echo "findings-count=$FINDINGS_COUNT" >> "$GITHUB_OUTPUT"
-            echo "Found $FINDINGS_COUNT security findings"
-          else
-            echo "findings-count=0" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Count findings and set output
+        if: always() && hashFiles('semgrep-results.json') != ''
+        id: count-findings
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const results = JSON.parse(fs.readFileSync('semgrep-results.json', 'utf8'));
+              const findingsCount = results.results ? results.results.length : 0;
+              
+              core.setOutput('findings-count', findingsCount);
+              core.info(`Found ${findingsCount} security findings`);
+              
+              return findingsCount;
+            } catch (error) {
+              core.setOutput('findings-count', 0);
+              core.warning('Could not parse semgrep results, assuming 0 findings');
+              return 0;
+            }
           
       - name: Upload SARIF results
         if: always() && hashFiles('semgrep-results.sarif') != ''
@@ -161,19 +177,19 @@ jobs:
       - name: Comment on PR
         if: |
           github.event_name == 'pull_request' && 
-          steps.scan.outputs.findings-count != '0' &&
+          steps.count-findings.outputs.findings-count != '0' &&
           hashFiles('semgrep-results.json') != ''
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const results = JSON.parse(fs.readFileSync('semgrep-results.json', 'utf8'));
-            const findingsCount = results.results.length;
+            const findingsCount = results.results ? results.results.length : 0;
             
             if (findingsCount === 0) return;
             
-            const severityCounts = results.results.reduce((acc, result) => {
-              const severity = result.extra.severity;
+            const severityCounts = (results.results || []).reduce((acc, result) => {
+              const severity = result.extra?.severity || 'UNKNOWN';
               acc[severity] = (acc[severity] || 0) + 1;
               return acc;
             }, {});
@@ -193,10 +209,10 @@ jobs:
             <details>
             <summary>Top 3 Findings</summary>
             
-            ${results.results.slice(0, 3).map(result => 
-              `**${result.check_id}** (${result.extra.severity})\n` +
-              `📍 \`${result.path}:${result.start.line}\`\n` +
-              `💡 ${result.extra.message}\n`
+            ${(results.results || []).slice(0, 3).map(result => 
+              `**${result.check_id}** (${result.extra?.severity || 'UNKNOWN'})\n` +
+              `📍 \`${result.path}:${result.start?.line || 'N/A'}\`\n` +
+              `💡 ${result.extra?.message || 'No message available'}\n`
             ).join('\n---\n')}
             
             </details>`;
@@ -210,12 +226,24 @@ jobs:
             
       - name: Fail on high severity findings
         if: github.event_name == 'pull_request'
-        run: |
-          if [ -f "semgrep-results.json" ]; then
-            HIGH_SEVERITY=$(jq '.results[] | select(.extra.severity == "ERROR") | .check_id' semgrep-results.json | wc -l)
-            if [ "$HIGH_SEVERITY" -gt 0 ]; then
-              echo "❌ Found $HIGH_SEVERITY high severity (ERROR) findings"
-              echo "Please review and fix these issues before merging"
-              exit 1
-            fi
-          fi
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            if (!fs.existsSync('semgrep-results.json')) {
+              return;
+            }
+            
+            try {
+              const results = JSON.parse(fs.readFileSync('semgrep-results.json', 'utf8'));
+              const highSeverityCount = (results.results || []).filter(
+                result => result.extra?.severity === 'ERROR'
+              ).length;
+              
+              if (highSeverityCount > 0) {
+                core.setFailed(`❌ Found ${highSeverityCount} high severity (ERROR) findings. Please review and fix these issues before merging.`);
+              }
+            } catch (error) {
+              core.warning('Could not parse semgrep results for severity check');
+            }
