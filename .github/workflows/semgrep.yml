@@ -5,17 +5,7 @@ on:
   # Scan in PRs:
   pull_request: {}
   # Scan on-demand through GitHub Actions interface:
-  workflow_dispatch:
-    inputs:
-      fail_on_findings:
-        description: 'Fail workflow if findings are detected'
-        required: false
-        default: false
-        type: boolean
-      exclude_patterns:
-        description: 'Comma-separated list of patterns to exclude (e.g., "node_modules,dist")'
-        required: false
-        default: ''
+  workflow_dispatch: {}
   # Scan mainline branches and report all findings:
   push:
     branches: ["master", "main"]
@@ -24,16 +14,8 @@ on:
     - cron: '20 17 * * *' # Sets Semgrep to scan every day at 17:20 UTC.
     # It is recommended to change the schedule to a random time.
 
-# Limit concurrent runs of this workflow
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
-  security-events: write  # For GitHub Code Scanning integration
-  pull-requests: write    # For PR comments and status checks
-  statuses: write         # For PR status checks
 
 jobs:
   semgrep:
@@ -41,7 +23,6 @@ jobs:
     name: semgrep-oss/scan
     # If you are self-hosting, change the following `runs-on` value: 
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Set a timeout to prevent long-running jobs
 
     container:
       # A Docker image with Semgrep installed. Do not change this.
@@ -52,236 +33,6 @@ jobs:
 
     steps:
       # Fetch project source with GitHub Actions Checkout. Use either v3 or v4.
-      - name: Checkout code
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0  # Fetch all history for better analysis
-      
-      # Ensure required tools are available
-      - name: Check for required tools
-        shell: bash
-        run: |
-          if ! command -v jq &> /dev/null; then
-            echo "::error::jq is required but not installed. It should be available in the semgrep container."
-            exit 1
-          fi
-
-      # Set up cache for Semgrep rules
-      - name: Cache Semgrep rules
-        uses: actions/cache@v4
-        with:
-          path: ~/.semgrep
-          key: ${{ runner.os }}-semgrep-${{ hashFiles('**/.semgrepignore') }}
-          restore-keys: |
-            ${{ runner.os }}-semgrep-
-
-      # Set up exclusion patterns if provided
-      - name: Set up exclusion patterns
-        id: exclusions
-        shell: bash
-        run: |
-          # Initialize with default exclusions
-          EXCLUDE_ARGS="--exclude node_modules --exclude dist --exclude .git"
-          
-          # Override with custom exclusions if provided
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.exclude_patterns }}" ]; then
-            EXCLUDE_ARGS=""
-            IFS=',' read -ra PATTERNS <<< "${{ github.event.inputs.exclude_patterns }}"
-            for pattern in "${PATTERNS[@]}"; do
-              EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude $pattern"
-            done
-          fi
-          
-          echo "exclude_args=$EXCLUDE_ARGS" >> $GITHUB_OUTPUT
-
-      # Run Semgrep scan with enhanced configuration
-      - name: Run Semgrep scan
-        id: semgrep
-        shell: bash
-        run: |
-          # Run Semgrep with configured options
-          set +e
-          semgrep scan \
-            --config auto \
-            ${{ steps.exclusions.outputs.exclude_args }} \
-            --json > semgrep-results.json
-          
-          EXIT_CODE=$?
-          
-          # Exit codes:
-          # 0: No errors, no findings
-          # 1: Findings found
-          # 2: Fatal error
-          
-          if [ $EXIT_CODE -eq 2 ]; then
-            echo "::error::Semgrep scan failed with a fatal error"
-            exit 2
-          fi
-          
-          # Count findings
-          FINDINGS=$(cat semgrep-results.json | jq -r '.results | length')
-          echo "findings=$FINDINGS" >> $GITHUB_OUTPUT
-          
-          # Determine if we should fail based on findings
-          SHOULD_FAIL="false"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
-             [ "${{ github.event.inputs.fail_on_findings }}" = "true" ] && \
-             [ $FINDINGS -gt 0 ]; then
-            SHOULD_FAIL="true"
-          fi
-          echo "should_fail=$SHOULD_FAIL" >> $GITHUB_OUTPUT
-          
-          exit 0
-        env:
-          SEMGREP_TIMEOUT: 300
-
-      # Upload scan results as an artifact
-      - name: Upload scan results
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-results
-          path: semgrep-results.json
-          retention-days: 7
-
-      # Generate GitHub Code Scanning compatible output
-      - name: Convert Semgrep output to SARIF
-        shell: bash
-        run: |
-          semgrep scan \
-            --sarif \
-            --output=semgrep-results.sarif \
-            --config auto \
-            ${{ steps.exclusions.outputs.exclude_args }}
-        env:
-          SEMGREP_TIMEOUT: 300
-
-      # Upload SARIF file for GitHub Code Scanning
-      - name: Upload SARIF file
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep-results.sarif
-          category: semgrep
-
-      # Summarize findings
-      - name: Summarize findings
-        shell: bash
-        run: |
-          FINDINGS="${{ steps.semgrep.outputs.findings }}"
-          if [ "$FINDINGS" -gt 0 ]; then
-            echo "::warning::Semgrep found $FINDINGS potential security issues. See the uploaded artifacts for details."
-            echo "Top findings:"
-            cat semgrep-results.json | jq -r '.results[0:5] | .[] | "- " + .check_id + ": " + .extra.message + " in " + .path + " (line " + (.start.line | tostring) + ")"'
-            
-            # Create a markdown summary
-            {
-              echo "## 🔍 Semgrep Security Scan Results"
-              echo ""
-              echo "Found **$FINDINGS** potential security issues."
-              echo ""
-              echo "### Top findings:"
-              cat semgrep-results.json | jq -r '.results[0:5] | .[] | "- **" + .check_id + "**: " + .extra.message + " in `" + .path + "` (line " + (.start.line | tostring) + ")"'
-            } >> $GITHUB_STEP_SUMMARY
-          else
-            echo "No security issues found by Semgrep."
-            {
-              echo "## ✅ Semgrep Security Scan Results"
-              echo ""
-              echo "No security issues found."
-            } >> $GITHUB_STEP_SUMMARY
-          fi
-
-      # Generate a detailed report of findings
-      - name: Generate detailed report
-        if: steps.semgrep.outputs.findings != '0'
-        shell: bash
-        run: |
-          echo "Generating detailed report of findings..."
-          {
-            echo "# Semgrep Detailed Findings Report"
-            echo ""
-            echo "## Summary"
-            echo ""
-            echo "- **Total findings:** ${{ steps.semgrep.outputs.findings }}"
-            echo "- **Scan date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo "- **Repository:** ${{ github.repository }}"
-            echo "- **Branch/Ref:** ${{ github.ref }}"
-            echo ""
-            echo "## All Findings"
-            echo ""
-            cat semgrep-results.json | jq -r '.results[] | "### " + .check_id + "\n\n" +
-              "- **Severity:** " + (.extra.severity // "unknown") + "\n" +
-              "- **File:** `" + .path + "`\n" +
-              "- **Line:** " + (.start.line | tostring) + "\n" +
-              "- **Message:** " + .extra.message + "\n" +
-              "- **Code snippet:**\n\n```\n" + .extra.lines + "\n```\n\n"'
-          } > semgrep-detailed-report.md
-          
-          # Upload the detailed report as an artifact
-          echo "Detailed report generated at semgrep-detailed-report.md"
-
-      # Upload detailed report as an artifact
-      - name: Upload detailed report
-        if: steps.semgrep.outputs.findings != '0'
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-detailed-report
-          path: semgrep-detailed-report.md
-          retention-days: 7
-
-      # Post results as PR comment if this is a pull request
-      - name: Post results to PR
-        if: github.event_name == 'pull_request' && steps.semgrep.outputs.findings != '0'
-        shell: bash
-        run: |
-          FINDINGS="${{ steps.semgrep.outputs.findings }}"
-          
-          # Create a comment on the PR
-          COMMENT="## 🔍 Semgrep Security Scan Results\n\n"
-          COMMENT+="Found **$FINDINGS** potential security issues.\n\n"
-          COMMENT+="[View detailed results in the workflow artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n\n"
-          
-          # Add the first 5 findings to the comment
-          COMMENT+="### Top findings:\n\n"
-          cat semgrep-results.json | jq -r '.results[0:5] | .[] | "- **" + .check_id + "**: " + .extra.message + " in `" + .path + "` (line " + (.start.line | tostring) + ")\n"' >> pr_comment.txt
-          COMMENT+=$(cat pr_comment.txt)
-          
-          echo "$COMMENT" > pr_comment.md
-          
-          # Post comment to PR using GitHub CLI
-          gh pr comment ${{ github.event.pull_request.number }} -F pr_comment.md
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      # Create a PR status check
-      - name: Create PR status check
-        if: github.event_name == 'pull_request'
-        shell: bash
-        run: |
-          FINDINGS="${{ steps.semgrep.outputs.findings }}"
-          if [ "$FINDINGS" -gt 0 ]; then
-            STATE="failure"
-            DESCRIPTION="Semgrep found $FINDINGS security issues"
-          else
-            STATE="success"
-            DESCRIPTION="No security issues found by Semgrep"
-          fi
-          
-          # Create a status check using GitHub API
-          curl -X POST \
-            -H "Authorization: token ${{ github.token }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
-            -d "{
-              \"state\": \"$STATE\",
-              \"target_url\": \"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
-              \"description\": \"$DESCRIPTION\",
-              \"context\": \"Semgrep Security Scan\"
-            }"
-
-      # Fail the workflow if requested and findings were detected
-      - name: Fail on findings if requested
-        if: steps.semgrep.outputs.should_fail == 'true'
-        shell: bash
-        run: |
-          echo "::error::Failing workflow because security issues were found and fail_on_findings was set to true"
-          exit 1
+      - uses: actions/checkout@v4
+      # Run the "semgrep scan" command on the command line of the docker image.
+      - run: semgrep scan --config auto
